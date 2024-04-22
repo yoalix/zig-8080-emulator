@@ -1,8 +1,8 @@
 # zig-8080-emulator
 
-Build using `zig build`.
-Copy wasm file to invaders-frontend/public `cp zig-out/lib/cpu8080.wasm invaders-frontend/public`
-Run bun server `cd invaders-frontend && bun run dev`
+1. Build using `zig build`.
+2. Copy wasm file to invaders-frontend/public `cp zig-out/lib/cpu8080.wasm invaders-frontend/public`.
+3. Run bun server `cd invaders-frontend && bun run dev`.
 
 # Testing
 
