@@ -1,15 +1,8 @@
 const std = @import("std");
-const disassembler = @import("./disassembler8080.zig");
-//const parity = @import("./parity.zig").parityParallel;
+const builtin = std.builtin;
+// const disassembler = @import("./disassembler8080.zig");
 
 pub fn parity(value: u8) bool {
-    // var p = false;
-    // var v = value;
-    // while (v != 0) {
-    // p = !p;
-    // v &= (v - 1);
-    // }
-    // return p;
     var ones: u8 = 0;
     for (0..8) |i| {
         ones += ((value >> @intCast(i)) & 1);
@@ -17,6 +10,31 @@ pub fn parity(value: u8) bool {
 
     return (ones & 1) == 0;
 }
+
+const CYCLES = [_]u8{
+    4, 10, 7, 5, 5, 5, 7, 4, 4, 10, 7, 5, 5, 5, 7, 4, //0x00..0x0f
+    4, 10, 7, 5, 5, 5, 7, 4, 4, 10, 7, 5, 5, 5, 7, 4, //0x10..0x1f
+    4, 10, 16, 5, 5,  5,  7,  4, 4, 10, 16, 5, 5, 5, 7, 4, //etc
+    4, 10, 13, 5, 10, 10, 10, 4, 4, 10, 13, 5, 5, 5, 7,
+    4,
+    //
+    5, 5, 5, 5, 5, 5, 7, 5, 5, 5, 5, 5, 5, 5, 7, 5, //0x40..0x4f
+    5, 5, 5, 5, 5, 5, 7, 5, 5, 5, 5, 5, 5, 5, 7, 5,
+    5, 5, 5, 5, 5, 5, 7, 5, 5, 5, 5, 5, 5, 5, 7, 5,
+    7, 7, 7, 7, 7, 7, 7, 7, 5, 5, 5, 5, 5, 5, 7,
+    5,
+    //
+    4, 4, 4, 4, 4, 4, 7, 4, 4, 4, 4, 4, 4, 4, 7, 4, //0x80..8x4f
+    4, 4, 4, 4, 4, 4, 7, 4, 4, 4, 4, 4, 4, 4, 7, 4,
+    4, 4, 4, 4, 4, 4, 7, 4, 4, 4, 4, 4, 4, 4, 7, 4,
+    4, 4, 4, 4, 4, 4, 7, 4, 4, 4, 4, 4, 4, 4, 7,
+    4,
+    //
+    11, 10, 10, 10, 17, 11, 7, 11, 11, 10, 10, 10, 10, 17, 7, 11, //0xc0..0xcf
+    11, 10, 10, 10, 17, 11, 7, 11, 11, 10, 10, 10, 10, 17, 7, 11,
+    11, 10, 10, 18, 17, 11, 7, 11, 11, 5,  10, 5,  17, 17, 7, 11,
+    11, 10, 10, 4,  17, 11, 7, 11, 11, 5,  10, 4,  17, 17, 7, 11,
+};
 
 const ConditionCode = struct {
     z: bool,
@@ -27,7 +45,7 @@ const ConditionCode = struct {
     pad: u8,
 };
 
-pub const State8080 = struct {
+pub const CPU8080 = struct {
     const Self = @This();
 
     a: u8,
@@ -42,10 +60,48 @@ pub const State8080 = struct {
     memory: [0x10_000]u8,
     cc: ConditionCode,
     int_enable: bool,
+    last_interrupt: f64,
+    next_interrupt: f64,
+    which_interrupt: u8,
+    shift_offset: u4,
+    shift0: u8,
+    shift1: u8,
+    halt: bool,
+    in_port1: u8,
 
-    pub fn init(comptime len: comptime_int, code: *const [len]u8) Self {
+    pub fn init(self: *Self, code: []const u8) void {
         var memory = [_]u8{0} ** 0x10_000;
-        for (code, 0x100..) |byte, i| {
+        for (code, 0..) |byte, i| {
+            memory[i] = byte;
+        }
+        // @memcpy(memory, code);
+        self.* = .{
+            .a = 0,
+            .b = 0,
+            .c = 0,
+            .d = 0,
+            .e = 0,
+            .h = 0,
+            .l = 0,
+            .sp = 0,
+            .pc = 0,
+            .memory = memory,
+            .cc = ConditionCode{ .z = false, .s = false, .p = false, .cy = false, .ac = false, .pad = 0 },
+            .int_enable = true,
+            .last_interrupt = 0,
+            .next_interrupt = 0,
+            .which_interrupt = 0,
+            .shift_offset = 0,
+            .shift0 = 0,
+            .shift1 = 0,
+            .halt = false,
+            .in_port1 = 0,
+        };
+    }
+
+    pub fn init_zig(comptime len: comptime_int, code: *const [len]u8, start_add: usize) Self {
+        var memory = [_]u8{0} ** 0x10_000;
+        for (code, start_add..) |byte, i| {
             memory[i] = byte;
         }
         const self = Self{
@@ -60,23 +116,32 @@ pub const State8080 = struct {
             .pc = 0,
             .memory = memory,
             .cc = ConditionCode{ .z = false, .s = false, .p = false, .cy = false, .ac = false, .pad = 0 },
-            .int_enable = false,
+            .int_enable = true,
+            .last_interrupt = 0,
+            .next_interrupt = 0,
+            .which_interrupt = 0,
+            .shift_offset = 0,
+            .shift0 = 0,
+            .shift1 = 0,
+            .halt = false,
+            .in_port1 = 0,
         };
         return self;
     }
 
     fn unimplemented(self: *Self) void {
         _ = self;
-        std.debug.print("Error: Unimplemented instruction\n");
+        // print("Error: Unimplemented instruction\n");
         std.debug.assert(false);
     }
 
-    pub fn emulate_op(self: *Self) void {
+    pub fn emulate_op(self: *Self) u8 {
         var opcode: u8 = self.memory[self.pc];
-        _ = disassembler.disassembleInstruction8080Op(self.memory, self.pc);
+        // _ = disassembler.disassembleInstruction8080Op(self.memory, self.pc);
         _ = switch (opcode) {
             0x00 => null, // NOP
             0x01 => { // LXI B,addr
+                // B <- byte 3, C <- byte 2
                 self.c = self.memory[self.pc + 1];
                 self.b = self.memory[self.pc + 2];
                 self.pc += 2;
@@ -87,7 +152,7 @@ pub const State8080 = struct {
             },
             0x03 => { // INX B
                 var bc: u16 = @as(u16, @as(u16, self.b) << 8 | self.c);
-                bc += 1;
+                bc +%= 1;
                 self.b = @truncate(bc >> 8);
                 self.c = @truncate(bc);
             },
@@ -159,7 +224,7 @@ pub const State8080 = struct {
             },
             0x13 => { // INX D
                 var de: u16 = @as(u16, @as(u16, self.d) << 8 | self.e);
-                de += 1;
+                de +%= 1;
                 self.d = @truncate(de >> 8);
                 self.e = @truncate(de);
             },
@@ -221,8 +286,8 @@ pub const State8080 = struct {
             0x20 => null,
             0x21 => { // LXI H,addr
                 // H <- byte 3, l <- byte 2
-                self.l = self.memory[self.pc + 1];
                 self.h = self.memory[self.pc + 2];
+                self.l = self.memory[self.pc + 1];
                 self.pc += 2;
             },
             0x22 => { // SHLD addr
@@ -252,7 +317,21 @@ pub const State8080 = struct {
                 self.h = self.memory[self.pc + 1];
                 self.pc += 1;
             },
-            0x27 => null, // Daa special
+            0x27 => {
+                // Daa special
+                if ((self.a & 0x0f) > 9 or self.cc.ac) {
+                    self.a += 6;
+                    self.cc.ac = (self.a & 0x0f) < 6;
+                }
+                if ((self.a & 0xf0) > 0x90 or self.cc.cy) {
+                    var result: u16 = @as(u16, self.a) + 0x60;
+                    self.a = @truncate(result & 0xff);
+                    self.cc.cy = result > 0xff;
+                    self.cc.z = self.a == 0;
+                    self.cc.s = (self.a & 0x80) == 0x80;
+                    self.cc.p = parity(self.a);
+                }
+            },
             0x28 => null,
             0x29 => { // DAD H
                 // HL <- HL + hl
@@ -327,7 +406,7 @@ pub const State8080 = struct {
                 // CY = 1
                 self.cc.cy = true;
             },
-            0x38 => null,
+            0x38 => null, // NOOP
             0x39 => { // DAD SP
                 // HL = HL + SP
                 var hl: u16 = @as(u16, @as(u16, self.h) << 8 | self.l);
@@ -526,7 +605,7 @@ pub const State8080 = struct {
             0x75 => { // MOV M,L
                 self.memory[@as(u16, @as(u16, self.h) << 8 | self.l)] = self.l;
             },
-            0x76 => std.os.exit(0), // HLT
+            0x76 => self.halt = true, // HLT
 
             0x77 => { // MOV M,A
                 self.memory[@as(u16, @as(u16, self.h) << 8 | self.l)] = self.a;
@@ -799,10 +878,10 @@ pub const State8080 = struct {
                 self.callAddr(!self.cc.z);
             },
             0xc5 => {
-                // PUSH B
+                // PUSH BC
                 // (SP-2) <- C; (SP-1) <- B; SP <- SP - 2
-                self.memory[self.sp - 1] = self.b;
                 self.memory[self.sp - 2] = self.c;
+                self.memory[self.sp - 1] = self.b;
                 self.sp -= 2;
             },
             0xc6 => { // ADI byte
@@ -829,31 +908,33 @@ pub const State8080 = struct {
                 self.callAddr(self.cc.z);
             },
             0xcd => { // CALL address
-                std.debug.print("CALL {x}\n", .{@as(u16, @as(u16, self.memory[self.pc + 2]) << 8 | self.memory[self.pc + 1])});
-                if (5 == (@as(u16, @as(u16, self.memory[self.pc + 2]) << 8) | self.memory[self.pc + 1])) {
-                    if (self.c == 9) {
-                        var offset: u16 = @as(u16, @as(u16, self.d) << 8 | self.e);
-                        var i: u16 = offset + 3;
-                        var char: u8 = self.memory[i];
-                        std.debug.print("---------------------------------------------------\n", .{});
-                        while (char != '$') {
-                            std.debug.print("{c}", .{char});
-                            i +%= 1;
-                            char = self.memory[i];
-                        }
-                        var addr = (self.memory[self.sp + 4] | @as(u16, @as(u16, self.memory[self.sp + 5]) << 8)) -% 2;
-                        _ = disassembler.disassembleInstruction8080Op(self.memory, addr);
-                        std.debug.print("\n---------------------------------------------------\n", .{});
-                        std.debug.print("\n", .{});
-                    } else if (self.c == 2) {
-                        std.debug.print("print char routine called", .{});
-                    }
-                    self.pc += 2;
-                } else if (0 == (@as(u16, @as(u16, self.memory[self.pc + 2]) << 8) | self.memory[self.pc + 1])) {
-                    std.os.exit(0);
-                } else {
-                    self.callAddr(true);
-                }
+                // print("CALL {x}\n", .{@as(u16, @as(u16, self.memory[self.pc + 2]) << 8 | self.memory[self.pc + 1])});
+                // if (5 == (@as(u16, @as(u16, self.memory[self.pc + 2]) << 8) | self.memory[self.pc + 1])) {
+                // if (self.c == 9) {
+                // var offset: u16 = @as(u16, @as(u16, self.d) << 8 | self.e);
+                // var i: u16 = offset + 3;
+                // var char: u8 = self.memory[i];
+                // print("---------------------------------------------------\n", .{});
+                // while (char != '$') {
+                // print("{c}", .{char});
+                // i +%= 1;
+                // char = self.memory[i];
+                // }
+                // var addr = (self.memory[self.sp + 4] | @as(u16, @as(u16, self.memory[self.sp + 5]) << 8)) -% 2;
+                // _ = addr;
+                // _ = disassembler.disassembleInstruction8080Op(self.memory, addr);
+                // print("\n---------------------------------------------------\n", .{});
+                // print("\n", .{});
+                // } else if (self.c == 2) {
+                // print("print char routine called", .{});
+                // }
+                // self.pc += 2;
+                // } else if (0 == (@as(u16, @as(u16, self.memory[self.pc + 2]) << 8) | self.memory[self.pc + 1])) {
+                // std.os.exit(0);
+                // self.halt = true;
+                // } else {
+                self.callAddr(true);
+                // }
             },
             0xce => { // ACI byte
                 self.a = self.add(self.a, self.memory[self.pc + 1] + @intFromBool(self.cc.cy));
@@ -888,10 +969,10 @@ pub const State8080 = struct {
                 self.callAddr(!self.cc.cy);
             },
             0xd5 => {
-                // PUSH D
+                // PUSH DE
                 // (sp-2) <-E; (sp-1) <- D; SP <- SP-2
-                self.memory[self.sp - 2] = self.d;
-                self.memory[self.sp - 1] = self.e;
+                self.memory[self.sp - 2] = self.e;
+                self.memory[self.sp - 1] = self.d;
                 self.sp -= 2;
             },
             0xd6 => { // SUI byte
@@ -963,8 +1044,8 @@ pub const State8080 = struct {
             0xe5 => {
                 // PUSH H
                 // (SP-2) <- L; (SP-1) <- H; SP <- SP-2
-                self.memory[self.sp - 1] = self.h;
                 self.memory[self.sp - 2] = self.l;
+                self.memory[self.sp - 1] = self.h;
                 self.sp -= 2;
             },
             0xe6 => {
@@ -993,7 +1074,7 @@ pub const State8080 = struct {
                 // PCHL
                 // PC.hi <- H; PC.lo <- L
                 self.pc = @as(u16, @as(u16, self.h) << 8 | self.l);
-                return;
+                return CYCLES[0xe9];
             },
             0xea => {
                 // JPE addr
@@ -1048,7 +1129,7 @@ pub const State8080 = struct {
                 // if P, PC <- addr
                 self.jmp(!self.cc.s);
             },
-            0xf3 => null, // DI special
+            0xf3 => self.int_enable = false, // DI special
             0xf4 => {
                 // CP addr
                 // if P, CALL addr
@@ -1090,7 +1171,10 @@ pub const State8080 = struct {
                 // if M, PC <- addr
                 self.jmp(self.cc.s);
             },
-            0xfb => null, // EI
+            0xfb => {
+                // EI
+                self.int_enable = true;
+            },
             0xfc => {
                 // CM addr
                 // if M, CALL addr
@@ -1100,26 +1184,27 @@ pub const State8080 = struct {
             0xfe => {
                 // CPI byte
                 // A - byte
-                var x = self.a -% self.memory[self.pc + 1];
-                std.debug.print("CPI {x} - {x} = {x}\n", .{ self.a, self.memory[self.pc + 1], x });
-                self.cc.z = x == 0;
-                self.cc.s = (x & 0x80) == 0x80;
-                self.cc.p = parity(x);
-                self.cc.cy = self.a < self.memory[self.pc + 1];
+                // var x = self.a -% self.memory[self.pc + 1];
+                // self.cc.z = x == 0;
+                // self.cc.s = (x & 0x80) == 0x80;
+                // self.cc.p = parity(x);
+                // self.cc.cy = self.a < self.memory[self.pc + 1];
+                _ = self.sub(self.a, self.memory[self.pc + 1]);
+
                 self.pc += 1;
             },
             0xff => self.rst(0x38), // RST 7 CALL $38
 
         };
-        self.pc +%= 1;
-        std.debug.print("\tC={} P={} S={} Z={} CY={} AC={}\n", .{ self.cc.cy, self.cc.p, self.cc.s, self.cc.z, self.cc.cy, self.cc.ac });
-        std.debug.print("\tA 0x{x:0>2} B 0x{x:0>2} C 0x{x:0>2} D 0x{x:0>2} E 0x{x:0>2} H 0x{x:0>2} L 0x{x:0>2} SP 0x{x:0>4} PC 0x{x:0>4}\n", .{ self.a, self.b, self.c, self.d, self.e, self.h, self.l, self.sp, self.pc });
+
+        self.pc += 1;
+        return CYCLES[opcode];
+        // print("\tC={} P={} S={} Z={} CY={} AC={}\n", .{ self.cc.cy, self.cc.p, self.cc.s, self.cc.z, self.cc.cy, self.cc.ac });
+        // print("\tA 0x{x:0>2} B 0x{x:0>2} C 0x{x:0>2} D 0x{x:0>2} E 0x{x:0>2} H 0x{x:0>2} L 0x{x:0>2} SP 0x{x:0>4} PC 0x{x:0>4}\n", .{ self.a, self.b, self.c, self.d, self.e, self.h, self.l, self.sp, self.pc });
     }
 
     pub fn add(self: *Self, a: u8, b: u8) u8 {
         var result: u16 = @as(u16, a) +% @as(u16, b);
-        std.debug.print("add {x} + {x} = {x}\n", .{ a, b, result });
-        std.debug.print("carry {}\n", .{result > 0xff});
         self.cc.z = (result & 0xff) == 0;
         self.cc.s = (result & 0x80) != 0;
         self.cc.cy = result > 0xff;
@@ -1145,8 +1230,6 @@ pub const State8080 = struct {
 
     pub fn sub(self: *Self, a: u8, b: u8) u8 {
         var result: u8 = a -% b;
-        std.debug.print("sub {x} - {x} = {x}\n", .{ a, b, result });
-        std.debug.print("carry {}\n", .{b > a});
         self.cc.z = (result & 0xff) == 0;
         self.cc.s = (result & 0x80) != 0;
         self.cc.cy = b > a;
@@ -1174,9 +1257,6 @@ pub const State8080 = struct {
 
     pub fn ora(self: *Self, a: u8, b: u8) u8 {
         var result: u8 = a | b;
-        std.debug.print("ora {x} | {x} = {x}\n", .{ a, b, result });
-        std.debug.print("carry {}\n", .{result > 0xff});
-
         self.cc.z = result == 0;
         self.cc.s = (result & 0x80) != 0;
         self.cc.p = parity(result);
@@ -1187,9 +1267,7 @@ pub const State8080 = struct {
     pub fn callAddr(self: *Self, condition: bool) void {
         if (condition) {
             // (SP-1) <- PC.hi; (SP-2) <- PC.lo; SP <- SP-2; PC=adr
-            self.memory[self.sp - 1] = @truncate(self.pc + 2 >> 8);
-            self.memory[self.sp - 2] = @truncate(self.pc + 2);
-            self.sp -= 2;
+            self.push(@truncate(self.pc + 2 >> 8), @truncate(self.pc + 2));
             self.pc = @as(u16, @as(u16, self.memory[self.pc + 2]) << 8 | self.memory[self.pc + 1]);
             self.pc -%= 1;
         } else {
@@ -1216,9 +1294,194 @@ pub const State8080 = struct {
 
     pub fn rst(self: *Self, addr: u16) void {
         // CALL $addr
-        self.memory[self.sp - 1] = @truncate(self.pc + 1 >> 8);
-        self.memory[self.sp - 2] = @truncate(self.pc + 1);
-        self.sp -= 2;
+        self.push(@truncate(self.pc >> 8), @truncate(self.pc));
         self.pc = addr;
     }
+
+    pub fn push(self: *Self, a: u8, b: u8) void {
+        self.memory[self.sp - 1] = a;
+        self.memory[self.sp - 2] = b;
+        self.sp -= 2;
+    }
+
+    pub fn generateInterrupt(self: *Self, interrupt_num: u8) void {
+        // print("Interrupt {x}\n", .{interrupt_num});
+        if (!self.int_enable) return;
+        self.rst(8 * interrupt_num);
+        self.int_enable = false;
+    }
+    pub fn inSpaceInvaders(self: *Self, port: u8) u8 {
+        // _ = disassembler.disassembleInstruction8080Op(self.memory, self.pc);
+        self.pc += 2;
+        return switch (port) {
+            1 => 1,
+            3 => {
+                var v: u16 = @as(u16, self.shift1) << 8 | self.shift0;
+                return @truncate(v >> (8 - self.shift_offset));
+            },
+            else => 0,
+        };
+    }
+
+    pub fn outSpaceInvaders(self: *Self, port: u8, value: u8) void {
+        // _ = disassembler.disassembleInstruction8080Op(self.memory, self.pc);
+        switch (port) {
+            2 => self.shift_offset = @truncate(value & 0x7),
+            4 => {
+                self.shift0 = self.shift1;
+                self.shift1 = value;
+            },
+            else => {},
+        }
+        self.pc += 2;
+    }
+
+    // pub fn cpuStep(cpu: *Self) void {
+    pub fn cpuStep(cpu: *Self, now: f64) void {
+        // var now = jsTime();
+        // var now = if (std.builtin.cpu.arch.isWasm()) jsTime() else @as(f64, @floatFromInt(std.time.microTimestamp()));
+
+        if (cpu.last_interrupt == 0) {
+            cpu.last_interrupt = now;
+            cpu.next_interrupt = cpu.last_interrupt + 16000;
+            cpu.which_interrupt = 1;
+        }
+
+        if (cpu.int_enable and now > cpu.next_interrupt) {
+            cpu.generateInterrupt(cpu.which_interrupt);
+            cpu.which_interrupt = if (cpu.which_interrupt == 1) 2 else 1;
+            cpu.next_interrupt += 8000;
+        }
+
+        var since_last: f64 = now - cpu.last_interrupt;
+        var cycles_to_catch_up: f64 = since_last * 2;
+        var cycles: f64 = 0;
+
+        // printHex(@intFromFloat(cycles_to_catch_up), @intFromFloat(since_last), 0, 0);
+        while (cycles < cycles_to_catch_up) {
+            // printHex(cpu.pc, cpu.memory[cpu.pc], cpu.memory[cpu.pc + 1], cpu.memory[cpu.pc + 2]);
+            switch (cpu.memory[cpu.pc]) {
+                // 0x76 => return, //HLT
+                0xdb => { // IN
+                    cpu.a = cpu.inSpaceInvaders(cpu.memory[cpu.pc + 1]);
+                    cycles += 3;
+                },
+                0xd3 => { // OUT
+                    cpu.outSpaceInvaders(cpu.memory[cpu.pc + 1], cpu.a);
+                    cycles += 3;
+                },
+                else => cycles += @floatFromInt(cpu.emulate_op()),
+            }
+        }
+
+        cpu.last_interrupt = now;
+    }
+
+    pub fn step(cpu: *Self) i64 {
+        // printHex(cpu.pc, cpu.memory[cpu.pc], cpu.memory[cpu.pc + 1], cpu.memory[cpu.pc + 2]);
+        switch (cpu.memory[cpu.pc]) {
+            // 0x76 => return, //HLT
+            0xdb => { // IN
+                cpu.a = cpu.inSpaceInvaders(cpu.memory[cpu.pc + 1]);
+                return 3;
+            },
+            0xd3 => { // OUT
+                cpu.outSpaceInvaders(cpu.memory[cpu.pc + 1], cpu.a);
+                return 3;
+            },
+            else => return cpu.emulate_op(),
+        }
+    }
+
+    pub fn keyDown(cpu: *Self, key: u8) void {
+        cpu.in_port1 |= key;
+    }
+
+    pub fn keyUp(cpu: *Self, key: u8) void {
+        cpu.in_port1 &= ~key;
+    }
 };
+
+const alloc = std.heap.wasm_allocator;
+pub export fn cpuInit(len: usize, rom: [*]const u8) ?[*]u8 {
+    const cpu = alloc.alignedAlloc(u8, @alignOf(CPU8080), @sizeOf(CPU8080)) catch return null;
+    CPU8080.init(@ptrCast(@alignCast(cpu)), rom[0..len]);
+    return cpu.ptr;
+}
+
+pub export fn cpuSize() usize {
+    return @sizeOf(CPU8080);
+}
+
+pub export fn cpuDestroy(cpu: *CPU8080) void {
+    alloc.destroy(cpu);
+}
+
+pub export fn wasmAlloc(size: usize) ?[*]u8 {
+    return (alloc.alignedAlloc(u8, @import("builtin").target.maxIntAlignment(), size) catch return null).ptr;
+}
+
+pub export fn cpuStep(cpu_ptr: [*]u8, now: f64) void {
+    var cpu: *CPU8080 = @ptrCast(@alignCast(cpu_ptr));
+    cpu.cpuStep(now);
+}
+
+pub export fn cpuStepCycle(cpu_ptr: [*]u8) i32 {
+    var cpu: *CPU8080 = @ptrCast(@alignCast(cpu_ptr));
+    return @truncate(cpu.step());
+}
+
+pub export fn cpuGenerateInterrupt(cpu_ptr: [*]u8, interrupt_num: u8) void {
+    var cpu: *CPU8080 = @ptrCast(@alignCast(cpu_ptr));
+    cpu.generateInterrupt(interrupt_num);
+}
+
+pub export fn keyDown(cpu_ptr: [*]u8, key: u8) void {
+    var cpu: *CPU8080 = @ptrCast(@alignCast(cpu_ptr));
+    cpu.keyDown(key);
+}
+
+pub export fn keyUp(cpu_ptr: [*]u8, key: u8) void {
+    var cpu: *CPU8080 = @ptrCast(@alignCast(cpu_ptr));
+    cpu.keyUp(key);
+}
+
+// pub export fn cpuMemory(cpu: *CPU8080) ?*[65536]u8 {
+// pub export fn cpuMemory(cpu_ptr: [*]u8) ?*[65536]u8 {
+pub export fn cpuMemory(cpu_ptr: [*]u8) ?*u8 {
+    var cpu: *CPU8080 = @ptrCast(@alignCast(cpu_ptr));
+    return &cpu.memory[0];
+    // var memory = alloc.alignedAlloc(u8, 8, 65536) catch return null;
+    // for (cpu.memory[0..], 0..) |byte, i| {
+    // memory[i] = byte;
+    // }
+    // @memcpy(memory.ptr, cpu.memory[0..]);
+    // return @ptrCast(memory.ptr);
+}
+
+// pub export fn cpuScreen(cpu: *CPU8080) ?*[7168]u8 {
+// pub export fn cpuScreen(cpu: *CPU8080) ?[*]align(8) u8 {
+// pub export fn cpuScreen(cpu_ptr: [*]u8, screen: [*]u8) ?*u8 {
+pub export fn cpuScreen(cpu_ptr: [*]u8) ?*u8 {
+    var cpu: *CPU8080 = @ptrCast(@alignCast(cpu_ptr));
+    // var i: usize = 0;
+    // while (i < 7168) {
+    // printHex(cpu.memory[0x2400 + i + 0], cpu.memory[0x2400 + i + 1], cpu.memory[0x2400 + i + 2], cpu.memory[0x2400 + i + 3]);
+    // i += 4;
+    // }
+    return &cpu.memory[0x2400];
+}
+
+extern fn time() f64;
+pub inline fn jsTime() f64 {
+    return time();
+}
+
+extern fn print([*:0]const u8, usize) void;
+pub fn log(comptime str: []const u8, args: anytype) void {
+    var buf: [1024:0]u8 = undefined;
+    const string = std.fmt.bufPrintZ(&buf, str, args) catch &buf;
+    print(string, string.len);
+}
+
+extern fn printHex(u32, u32, u32, u32) void;

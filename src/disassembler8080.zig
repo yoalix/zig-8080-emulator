@@ -32,7 +32,6 @@ pub fn disassembleInstruction8080Op(codebuffer: [0x10_000]u8, pc: u16) u8 {
         },
         0x0f => std.debug.print("RRC", .{}),
         0x10 => std.debug.print("NOP", .{}),
-
         0x11 => {
             std.debug.print("LXI    D, {x:0>2}{x:0>2}", .{ codebuffer[pc + 2], codebuffer[pc + 1] });
             opbytes = 3;
